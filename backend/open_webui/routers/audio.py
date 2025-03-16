@@ -22,9 +22,10 @@ from fastapi import (
     UploadFile,
     status,
     APIRouter,
+    Form,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 
@@ -826,3 +827,99 @@ async def get_voices(request: Request, user=Depends(get_verified_user)):
             {"id": k, "name": v} for k, v in get_available_voices(request).items()
         ]
     }
+
+
+@router.post("/clone-voice")
+async def clone_voice(
+    request: Request,
+    name: str = Form(...),
+    files: list[UploadFile] = File(...),
+    remove_background_noise: bool = Form(False),
+    user=Depends(get_verified_user),
+):
+    """
+    Clone a voice using Eleven Labs API
+    """
+    log = logging.getLogger("AUDIO")
+    log.setLevel(SRC_LOG_LEVELS["AUDIO"])
+    
+    # Get the API key from config
+    api_key = request.app.state.config.AUDIO_CONFIG.get("tts", {}).get("ELEVENLABS_API_KEY", "")
+    
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Eleven Labs API key is not configured",
+        )
+    
+    if len(files) < 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one audio file is required",
+        )
+    
+    try:
+        # Create a multipart form data
+        form_data = aiohttp.FormData()
+        form_data.add_field("name", name)
+        form_data.add_field("remove_background_noise", str(remove_background_noise).lower())
+        
+        # Add all audio files
+        for file in files:
+            contents = await file.read()
+            form_data.add_field(
+                "files[]", 
+                contents, 
+                filename=file.filename,
+                content_type=file.content_type or "audio/mpeg"
+            )
+        
+        # Send the request to Eleven Labs API
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.elevenlabs.io/v1/voices/add",
+                data=form_data,
+                headers={"xi-api-key": api_key},
+                timeout=AIOHTTP_CLIENT_TIMEOUT,
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    log.error(f"Error from Eleven Labs API: {error_text}")
+                    raise HTTPException(
+                        status_code=response.status,
+                        detail=f"Error from TU•IPSE API: {error_text}",
+                    )
+                
+                result = await response.json()
+                
+                # Save the voice_id in user settings
+                from open_webui.models.users import Users
+                
+                current_user = Users.get_user_by_id(user.id)
+                if not current_user:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="User not found",
+                    )
+                
+                # Initialize settings if they don't exist
+                user_settings = current_user.settings or {}
+                if "audio" not in user_settings:
+                    user_settings["audio"] = {}
+                if "tts" not in user_settings["audio"]:
+                    user_settings["audio"]["tts"] = {}
+                
+                # Save the voice ID
+                user_settings["audio"]["tts"]["voice_id"] = result.get("voice_id")
+                Users.update_user_settings_by_id(user.id, user_settings)
+                
+                log.info(f"Saved voice ID {result.get('voice_id')} for user {user.id}")
+                
+                return JSONResponse(content=result)
+    
+    except Exception as e:
+        log.error(f"Error cloning voice: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error cloning voice: {str(e)}",
+        )
