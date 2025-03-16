@@ -34,12 +34,21 @@
 	/** @type {number|null} */
 	let animationFrame = null;
 	
+	// Audio device selection
+	/** @type {Array<{deviceId: string, label: string}>} */
+	let audioInputDevices = [];
+	let selectedAudioDeviceId = 'default';
+	let deviceLoadingError = false;
+	
 	onMount(() => {
 		if (typeof window !== 'undefined') {
 			const canvas = document.getElementById('visualizer');
 			if (canvas) {
 				canvasContext = canvas.getContext('2d');
 			}
+			
+			// Get available audio input devices
+			loadAudioDevices();
 		}
 		
 		return () => {
@@ -53,10 +62,56 @@
 		};
 	});
 	
+	// Function to load available audio input devices
+	async function loadAudioDevices() {
+		try {
+			// First request permission to access devices
+			await navigator.mediaDevices.getUserMedia({ audio: true })
+				.then(stream => {
+					// Stop the stream immediately after getting permission
+					stream.getTracks().forEach(track => track.stop());
+				});
+			
+			// Now get the list of devices
+			const devices = await navigator.mediaDevices.enumerateDevices();
+			audioInputDevices = devices
+				.filter(device => device.kind === 'audioinput')
+				.map(device => ({
+					deviceId: device.deviceId,
+					label: device.label || `Microphone (${device.deviceId.slice(0, 8)}...)`
+				}));
+			
+			// If we have devices but no default selected yet, select the first one
+			if (audioInputDevices.length > 0 && selectedAudioDeviceId === 'default') {
+				selectedAudioDeviceId = audioInputDevices[0].deviceId;
+			}
+			
+			deviceLoadingError = false;
+		} catch (error) {
+			console.error('Error accessing media devices:', error);
+			deviceLoadingError = true;
+			toast.error('Failed to load audio devices. Please check your browser permissions.');
+		}
+	}
+	
+	// Handle device selection change
+	function handleDeviceChange(event) {
+		selectedAudioDeviceId = event.target.value;
+		
+		// If recording is in progress, stop it when device changes
+		if (isRecording) {
+			stopRecording();
+		}
+	}
+	
 	// Function to start recording
 	async function startRecording() {
 		try {
-			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+			const stream = await navigator.mediaDevices.getUserMedia({ 
+				audio: { 
+					deviceId: { exact: selectedAudioDeviceId } 
+				} 
+			});
 			
 			// Set up audio context for visualization
 			audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -421,6 +476,52 @@
 					{/each}
 				</div>
 				
+				<!-- Microphone Device Selection -->
+				<div class="mb-4">
+					<label for="audio-device" class="block text-sm font-medium mb-2">
+						{$i18n.t('Microphone')}
+					</label>
+					
+					{#if deviceLoadingError}
+						<div class="text-sm text-destructive mb-2">
+							{$i18n.t('Failed to load audio devices. Please ensure you have given microphone permission.')}
+							<button 
+								type="button" 
+								on:click={loadAudioDevices}
+								class="ml-2 text-primary underline"
+							>
+								{$i18n.t('Retry')}
+							</button>
+						</div>
+					{/if}
+					
+					<div class="relative">
+						<select
+							id="audio-device"
+							bind:value={selectedAudioDeviceId}
+							on:change={handleDeviceChange}
+							class="w-full p-2.5 rounded-md border border-input bg-background text-sm appearance-none"
+							disabled={isRecording || audioInputDevices.length === 0}
+						>
+							{#if audioInputDevices.length === 0}
+								<option value="default">{$i18n.t('No microphones available')}</option>
+							{:else}
+								{#each audioInputDevices as device}
+									<option value={device.deviceId}>{device.label}</option>
+								{/each}
+							{/if}
+						</select>
+						<div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-muted-foreground">
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+							</svg>
+						</div>
+					</div>
+					<div class="text-xs text-muted-foreground mt-1">
+						{$i18n.t('Select your microphone device. Changing the device will stop any ongoing recording.')}
+					</div>
+				</div>
+				
 				<!-- Visualization Canvas -->
 				<div class="mb-4">
 					<canvas id="visualizer" width="640" height="100" class="w-full bg-background/20 rounded-md"></canvas>
@@ -433,7 +534,7 @@
 							type="button"
 							on:click={startRecording}
 							class="flex items-center justify-center w-16 h-16 rounded-full bg-primary hover:bg-primary/90 text-white"
-							disabled={isLoading}
+							disabled={isLoading || audioInputDevices.length === 0}
 						>
 							<svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
