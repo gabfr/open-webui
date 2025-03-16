@@ -5,6 +5,7 @@ on:
     branches:
       - dev
       - main
+      - tuipse
   workflow_dispatch:
 
 jobs:
