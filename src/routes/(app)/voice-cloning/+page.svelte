@@ -11,6 +11,7 @@
 	let selectedFiles = [];
 	let removeNoise = true;
 	let isLoading = false;
+	/** @type {{voice_id: string, name: string}|null} */
 	let result = null;
 	let activeTab = 'upload'; // Default to upload tab
 	
@@ -40,9 +41,13 @@
 	let selectedAudioDeviceId = 'default';
 	let deviceLoadingError = false;
 	
+	// Add recording duration tracking variables
+	let recordingStartTime = 0;
+	let recordingDuration = 0;
+	
 	onMount(() => {
 		if (typeof window !== 'undefined') {
-			const canvas = document.getElementById('visualizer');
+			const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('visualizer'));
 			if (canvas) {
 				canvasContext = canvas.getContext('2d');
 			}
@@ -66,11 +71,9 @@
 	async function loadAudioDevices() {
 		try {
 			// First request permission to access devices
-			await navigator.mediaDevices.getUserMedia({ audio: true })
-				.then(stream => {
-					// Stop the stream immediately after getting permission
-					stream.getTracks().forEach(track => track.stop());
-				});
+			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+			// Stop the stream immediately after getting permission
+			stream.getTracks().forEach(track => track.stop());
 			
 			// Now get the list of devices
 			const devices = await navigator.mediaDevices.enumerateDevices();
@@ -87,15 +90,21 @@
 			}
 			
 			deviceLoadingError = false;
+			return true;
 		} catch (error) {
 			console.error('Error accessing media devices:', error);
 			deviceLoadingError = true;
 			toast.error('Failed to load audio devices. Please check your browser permissions.');
+			return false;
 		}
 	}
 	
 	// Handle device selection change
+	/**
+	 * @param {Event} event
+	 */
 	function handleDeviceChange(event) {
+		// @ts-ignore
 		selectedAudioDeviceId = event.target.value;
 		
 		// If recording is in progress, stop it when device changes
@@ -107,26 +116,54 @@
 	// Function to start recording
 	async function startRecording() {
 		try {
+			// Check if we have permission first
+			if (audioInputDevices.length === 0) {
+				const permissionGranted = await loadAudioDevices();
+				if (!permissionGranted) {
+					toast.error('Please grant microphone permissions to record audio');
+					return;
+				}
+			}
+			
 			const stream = await navigator.mediaDevices.getUserMedia({ 
 				audio: { 
-					deviceId: { exact: selectedAudioDeviceId } 
+					deviceId: { exact: selectedAudioDeviceId },
+					echoCancellation: true,
+					noiseSuppression: true,
+					autoGainControl: true
 				} 
 			});
 			
 			// Set up audio context for visualization
 			audioContext = new (window.AudioContext || window.webkitAudioContext)();
+			
+			// Explicitly resume the audio context (needed in many browsers)
+			if (audioContext.state === 'suspended') {
+				await audioContext.resume();
+			}
+			
 			analyser = audioContext.createAnalyser();
 			const source = audioContext.createMediaStreamSource(stream);
 			source.connect(analyser);
+			
+			// Settings for better voice visualization
 			analyser.fftSize = 256;
+			analyser.minDecibels = -90;
+			analyser.maxDecibels = -10;
+			analyser.smoothingTimeConstant = 0.85;
 			
 			const bufferLength = analyser.frequencyBinCount;
 			dataArray = new Uint8Array(bufferLength);
 			
+			console.log('Audio setup complete, starting visualization');
+			
 			// Start visualization
 			visualize();
 			
-			mediaRecorder = new MediaRecorder(stream);
+			mediaRecorder = new MediaRecorder(stream, {
+				audioBitsPerSecond: 128000,
+				mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
+			});
 			
 			mediaRecorder.ondataavailable = (event) => {
 				audioChunks.push(event.data);
@@ -141,7 +178,9 @@
 				recordedAudio = audioURL;
 				
 				// Cleanup streams
-				mediaRecorder.stream.getTracks().forEach(track => track.stop());
+				if (mediaRecorder && mediaRecorder.stream) {
+					mediaRecorder.stream.getTracks().forEach(track => track.stop());
+				}
 				
 				// Stop visualization
 				if (animationFrame) {
@@ -152,20 +191,36 @@
 			audioChunks = [];
 			mediaRecorder.start();
 			isRecording = true;
-		} catch (error) {
+			
+			// Reset duration and set start time
+			recordingDuration = 0;
+			recordingStartTime = Date.now();
+		} catch (/** @type {any} */ error) {
 			toast.error(`Microphone access error: ${error.message}`);
+			console.error('Detailed recording error:', error);
 		}
 	}
 	
 	function stopRecording() {
 		if (mediaRecorder && isRecording) {
+			// Calculate recording duration in seconds
+			recordingDuration = (Date.now() - recordingStartTime) / 1000;
+			
 			mediaRecorder.stop();
 			isRecording = false;
+			
+			// Also stop the audio context
+			if (audioContext && audioContext.state === 'running') {
+				audioContext.suspend();
+			}
 		}
 	}
 	
 	function visualize() {
-		if (!analyser || !canvasContext) return;
+		if (!analyser || !canvasContext) {
+			console.warn('Visualization failed: missing analyser or canvas context');
+			return;
+		}
 		
 		const canvas = canvasContext.canvas;
 		const WIDTH = canvas.width;
@@ -174,15 +229,40 @@
 		canvasContext.clearRect(0, 0, WIDTH, HEIGHT);
 		
 		function draw() {
+			if (!analyser || !canvasContext) return;
+			
 			animationFrame = requestAnimationFrame(draw);
 			
+			// Get time domain data
 			analyser.getByteTimeDomainData(dataArray);
+			
+			// Check if we're getting audio data (for debugging)
+			let hasAudioData = false;
+			for (let i = 0; i < dataArray.length; i++) {
+				if (dataArray[i] !== 128) {
+					hasAudioData = true;
+					break;
+				}
+			}
+			
+			if (!hasAudioData) {
+				// If no audio data, draw a flat line at the center
+				canvasContext.fillStyle = 'rgb(30, 30, 30)';
+				canvasContext.fillRect(0, 0, WIDTH, HEIGHT);
+				canvasContext.lineWidth = 4;
+				canvasContext.strokeStyle = 'rgb(100, 0, 0)'; // Darker red for silent
+				canvasContext.beginPath();
+				canvasContext.moveTo(0, HEIGHT / 2);
+				canvasContext.lineTo(WIDTH, HEIGHT / 2);
+				canvasContext.stroke();
+				return;
+			}
 			
 			canvasContext.fillStyle = 'rgb(30, 30, 30)';
 			canvasContext.fillRect(0, 0, WIDTH, HEIGHT);
 			
-			canvasContext.lineWidth = 2;
-			canvasContext.strokeStyle = 'rgb(0, 200, 200)';
+			canvasContext.lineWidth = 4;
+			canvasContext.strokeStyle = 'rgb(255, 0, 0)';
 			canvasContext.beginPath();
 			
 			const sliceWidth = WIDTH / dataArray.length;
@@ -220,6 +300,14 @@
 			return;
 		}
 		
+		// Check if at least 3 minutes (180 seconds) of audio was recorded
+		if (recordingDuration < 180) {
+			const minutesRecorded = Math.floor(recordingDuration / 60);
+			const secondsRecorded = Math.floor(recordingDuration % 60);
+			toast.error(`Please record at least 3 minutes of audio. You recorded ${minutesRecorded}:${secondsRecorded.toString().padStart(2, '0')}.`);
+			return;
+		}
+		
 		isLoading = true;
 		result = null;
 		
@@ -244,7 +332,7 @@
 			
 			result = await response.json();
 			toast.success('Voice cloned successfully!');
-		} catch (error) {
+		} catch (/** @type {any} */ error) {
 			toast.error(error.message || 'Failed to clone voice');
 		} finally {
 			isLoading = false;
@@ -286,14 +374,18 @@
 			
 			result = await response.json();
 			toast.success('Voice cloned successfully!');
-		} catch (error) {
+		} catch (/** @type {any} */ error) {
 			toast.error(error.message || 'Failed to clone voice');
 		} finally {
 			isLoading = false;
 		}
 	}
 	
+	/**
+	 * @param {Event} event
+	 */
 	function handleFileSelect(event) {
+		// @ts-ignore
 		const files = Array.from(event.target.files);
 		const audioFiles = files.filter(file => 
 			file.type.startsWith('audio/') || 
@@ -308,6 +400,9 @@
 		selectedFiles = [...selectedFiles, ...audioFiles];
 	}
 	
+	/**
+	 * @param {number} index
+	 */
 	function removeFile(index) {
 		selectedFiles = selectedFiles.filter((_, i) => i !== index);
 	}
@@ -348,7 +443,29 @@
 				</button>
 				<button 
 					class={`py-2 px-4 font-medium ${activeTab === 'record' ? 'border-b-2 border-primary text-primary' : 'text-muted-foreground'}`} 
-					on:click={() => activeTab = 'record'}
+					on:click={() => {
+						activeTab = 'record';
+						// Initialize canvas when switching to record tab
+						setTimeout(() => {
+							const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('visualizer'));
+							if (canvas && !canvasContext) {
+								canvasContext = canvas.getContext('2d');
+								// Draw an initial flat line
+								if (canvasContext) {
+									const WIDTH = canvas.width;
+									const HEIGHT = canvas.height;
+									canvasContext.fillStyle = 'rgb(30, 30, 30)';
+									canvasContext.fillRect(0, 0, WIDTH, HEIGHT);
+									canvasContext.lineWidth = 4;
+									canvasContext.strokeStyle = 'rgb(100, 0, 0)';
+									canvasContext.beginPath();
+									canvasContext.moveTo(0, HEIGHT / 2);
+									canvasContext.lineTo(WIDTH, HEIGHT / 2);
+									canvasContext.stroke();
+								}
+							}
+						}, 100);
+					}}
 				>
 					{$i18n.t('Record Now')}
 				</button>
@@ -528,30 +645,50 @@
 				</div>
 				
 				<!-- Record Button -->
-				<div class="flex justify-center mb-6">
-					{#if !isRecording}
-						<button 
-							type="button"
-							on:click={startRecording}
-							class="flex items-center justify-center w-16 h-16 rounded-full bg-primary hover:bg-primary/90 text-white"
-							disabled={isLoading || audioInputDevices.length === 0}
-						>
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-							</svg>
-						</button>
-					{:else}
-						<button 
-							type="button"
-							on:click={stopRecording}
-							class="flex items-center justify-center w-16 h-16 rounded-full bg-destructive hover:bg-destructive/90 text-white"
-						>
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
-							</svg>
-						</button>
-					{/if}
+				<div class="flex flex-col items-center justify-center mb-6">
+					<div class="flex justify-center mb-2">
+						{#if !isRecording}
+							<button 
+								type="button"
+								on:click={startRecording}
+								class="flex items-center justify-center w-16 h-16 rounded-full bg-primary hover:bg-primary/90 text-white"
+								disabled={isLoading || audioInputDevices.length === 0}
+							>
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+								</svg>
+							</button>
+						{:else}
+							<button 
+								type="button"
+								on:click={stopRecording}
+								class="flex items-center justify-center w-16 h-16 rounded-full bg-destructive hover:bg-destructive/90 text-white"
+							>
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
+								</svg>
+							</button>
+						{/if}
+					</div>
+					
+					<!-- Recording duration info -->
+					<div class="text-sm text-center mt-2">
+						{#if isRecording}
+							<span class="text-destructive font-medium animate-pulse">Recording...</span>
+						{:else if recordingDuration > 0}
+							<span class="{recordingDuration >= 180 ? 'text-success' : 'text-warning'} font-medium">
+								{$i18n.t('Recorded')}: {Math.floor(recordingDuration / 60)}:{Math.floor(recordingDuration % 60).toString().padStart(2, '0')}
+								{#if recordingDuration < 180}
+									<span class="text-warning">
+										({$i18n.t('Need')} {Math.ceil((180 - recordingDuration) / 60)} {$i18n.t('more minutes')})
+									</span>
+								{/if}
+							</span>
+						{:else}
+							<span class="text-muted-foreground">{$i18n.t('Please record at least 3 minutes')}</span>
+						{/if}
+					</div>
 				</div>
 				
 				<!-- Audio Playback if recorded -->
