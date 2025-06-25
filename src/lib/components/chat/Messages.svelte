@@ -14,7 +14,7 @@
 
 	import { toast } from 'svelte-sonner';
 	import { getChatList, updateChatById } from '$lib/apis/chats';
-	import { copyToClipboard, findWordIndices } from '$lib/utils';
+	import { copyToClipboard, extractCurlyBraceWords } from '$lib/utils';
 
 	import Message from './Messages/Message.svelte';
 	import Loader from '../common/Loader.svelte';
@@ -255,7 +255,11 @@
 		await updateChat();
 	};
 
-	const editMessage = async (messageId, content, submit = true) => {
+	const editMessage = async (messageId, { content, files }, submit = true) => {
+		if ((selectedModels ?? []).filter((id) => id).length === 0) {
+			toast.error($i18n.t('Model not selected'));
+			return;
+		}
 		if (history.messages[messageId].role === 'user') {
 			if (submit) {
 				// New user message
@@ -268,7 +272,7 @@
 					childrenIds: [],
 					role: 'user',
 					content: userPrompt,
-					...(history.messages[messageId].files && { files: history.messages[messageId].files }),
+					...(files && { files: files }),
 					models: selectedModels,
 					timestamp: Math.floor(Date.now() / 1000) // Unix epoch
 				};
@@ -290,6 +294,7 @@
 			} else {
 				// Edit user message
 				history.messages[messageId].content = content;
+				history.messages[messageId].files = files;
 				await updateChat();
 			}
 		} else {
@@ -406,19 +411,6 @@
 				}
 
 				prompt = text;
-
-				await tick();
-
-				const chatInputContainerElement = document.getElementById('chat-input-container');
-				if (chatInputContainerElement) {
-					prompt = p;
-
-					chatInputContainerElement.style.height = '';
-					chatInputContainerElement.style.height =
-						Math.min(chatInputContainerElement.scrollHeight, 200) + 'px';
-					chatInputContainerElement.focus();
-				}
-
 				await tick();
 			}}
 		/>
