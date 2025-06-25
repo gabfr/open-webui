@@ -7,16 +7,19 @@
 	import markedKatexExtension from '$lib/utils/marked/katex-extension';
 
 	import MarkdownTokens from './Markdown/MarkdownTokens.svelte';
-	import { createEventDispatcher } from 'svelte';
-
-	const dispatch = createEventDispatcher();
 
 	export let id = '';
 	export let content;
 	export let model = null;
 	export let save = false;
+	export let preview = false;
 
 	export let sourceIds = [];
+
+	export let onSave = () => {};
+	export let onUpdate = () => {};
+
+	export let onPreview = () => {};
 
 	export let onSourceClick = () => {};
 	export let onTaskClick = () => {};
@@ -24,7 +27,8 @@
 	let tokens = [];
 
 	const options = {
-		throwOnError: false
+		throwOnError: false,
+		breaks: true
 	};
 
 	marked.use(markedKatexExtension(options));
@@ -44,13 +48,11 @@
 		{tokens}
 		{id}
 		{save}
+		{preview}
 		{onTaskClick}
 		{onSourceClick}
-		on:update={(e) => {
-			dispatch('update', e.detail);
-		}}
-		on:code={(e) => {
-			dispatch('code', e.detail);
-		}}
+		{onSave}
+		{onUpdate}
+		{onPreview}
 	/>
 {/key}
